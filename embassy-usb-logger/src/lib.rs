@@ -90,6 +90,40 @@ impl<const N: usize, T: ReceiverHandler + Send + Sync> UsbLogger<N, T> {
     }
 
     /// Run the USB logger using the state and USB driver. Never returns.
+    pub async fn run_with_config<'d, D>(&'d self, state: &'d mut LoggerState<'d>, driver: D, config: Config<'d> ) -> !
+    where
+        D: Driver<'d>,
+        Self: 'd,
+    {
+        //let mut config = Config::new(0xc0de, 0xcafe);
+        //config.manufacturer = Some("Embassy");
+        //config.product = Some("USB-serial logger");
+        //config.serial_number = None;
+        //config.max_power = 100;
+        //config.max_packet_size_0 = MAX_PACKET_SIZE;
+
+        let mut builder = Builder::new(
+            driver,
+            config,
+            &mut state.config_descriptor,
+            &mut state.bos_descriptor,
+            &mut state.msos_descriptor,
+            &mut state.control_buf,
+        );
+
+        // Create classes on the builder.
+        let class = CdcAcmClass::new(&mut builder, &mut state.state, MAX_PACKET_SIZE as u16);
+        let (mut sender, mut receiver) = class.split();
+
+        // Build the builder.
+        let mut device = builder.build();
+        loop {
+            let run_fut = device.run();
+            let class_fut = self.run_logger_class(&mut sender, &mut receiver);
+            join(run_fut, class_fut).await;
+        }
+    }
+    /// Run the USB logger using the state and USB driver. Never returns.
     pub async fn run<'d, D>(&'d self, state: &'d mut LoggerState<'d>, driver: D) -> !
     where
         D: Driver<'d>,
@@ -101,6 +135,13 @@ impl<const N: usize, T: ReceiverHandler + Send + Sync> UsbLogger<N, T> {
         config.serial_number = None;
         config.max_power = 100;
         config.max_packet_size_0 = MAX_PACKET_SIZE;
+
+        // Required for windows compatiblity.
+        // https://developer.nordicsemi.com/nRF_Connect_SDK/doc/1.9.1/kconfig/CONFIG_CDC_ACM_IAD.html#help
+        config.device_class = 0xEF;
+        config.device_sub_class = 0x02;
+        config.device_protocol = 0x01;
+        config.composite_with_iads = true;
 
         let mut builder = Builder::new(
             driver,
@@ -274,6 +315,21 @@ macro_rules! with_class {
             LOGGER.create_future_from_class($p)
         }
     }};
+}
+
+
+#[macro_export]
+macro_rules! logger_run {
+    ( $x:expr, $l:expr, $p:ident, $h:ty, $ha:expr,  $c:ident ) => {
+        unsafe {
+            static mut LOGGER: ::embassy_usb_logger::UsbLogger<$x, $h> = ::embassy_usb_logger::UsbLogger::new();
+            LOGGER.with_handler($ha);
+            let _ = ::log::set_logger_racy(&LOGGER).map(|()| log::set_max_level_racy($l));
+            let _ = LOGGER.run_with_config(&mut ::embassy_usb_logger::LoggerState::new(), $p, $c).await;
+        }
+    };
+
+
 }
 
 /// Initialize the USB serial logger from a serial class and return the future to run it.
